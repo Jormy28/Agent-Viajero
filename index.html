@@ -71,6 +71,7 @@
   }
   .tab-btn.active{ background:var(--glass-strong); color:var(--ink); }
   .graph-hint{ font-size:13px; color:var(--ink-dim); margin:0 0 10px; min-height:18px; }
+  .graph-hint.warn{ color:#ffb3ab; }
 
   svg{ width:100%; height:auto; touch-action:none; }
   .node-circle{
@@ -168,7 +169,7 @@
       <button class="tab-btn" id="tab-matriz" onclick="toggleVista('matriz')">🔢 Matriz</button>
     </div>
     <p class="graph-hint" id="graph-hint">Elige cuántas ciudades quieres explorar para empezar.</p>
-    <svg id="svg-main" viewBox="0 0 360 360"></svg>
+    <svg id="svg-main" viewBox="0 0 560 440"></svg>
     <div id="matriz-wrap" style="display:none;"></div>
   </div>
 
@@ -192,6 +193,8 @@
 
 <script>
 const INF = Infinity;
+const MAX_CONEXIONES = 3;           // máximo de rutas por ciudad
+const HINT_CONECTAR = 'Toca dos ciudades para conectarlas (máx. 3 rutas por ciudad), o genera un mapa al azar.';
 let n = 6;
 let nodos = [], matriz = [], posiciones = {};
 let fase = 'setup';
@@ -219,6 +222,12 @@ function setPill(id){
   });
 }
 
+function setHint(texto, warn=false){
+  const h = document.getElementById('graph-hint');
+  h.textContent = texto;
+  h.classList.toggle('warn', warn);
+}
+
 function toggleVista(cual){
   document.getElementById('tab-grafo').classList.toggle('active', cual==='grafo');
   document.getElementById('tab-matriz').classList.toggle('active', cual==='matriz');
@@ -241,10 +250,39 @@ function renderMatriz(){
   document.getElementById('matriz-wrap').innerHTML = html;
 }
 
+// ---------------- grado de cada nodo ----------------
+function grado(i){
+  let g = 0;
+  for(let j=0;j<n;j++) if(j!==i && matriz[i][j]!==INF) g++;
+  return g;
+}
+
+// ---------------- geometría: evitar que una ruta pase por encima de otra ciudad ----------------
+const RADIO_NODO = 19;
+const MARGEN_RUTA = 12; // holgura entre la línea y el borde de la ciudad
+
+function distPuntoSegmento(p, a, b){
+  const dx = b.x-a.x, dy = b.y-a.y;
+  const l2 = dx*dx + dy*dy;
+  let t = l2 === 0 ? 0 : ((p.x-a.x)*dx + (p.y-a.y)*dy) / l2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p.x-(a.x+t*dx), p.y-(a.y+t*dy));
+}
+
+// devuelve el índice de una ciudad que quedaría "tapando" la ruta i–j, o -1 si está libre
+function nodoBloqueante(i, j){
+  const a = posiciones[nodos[i]], b = posiciones[nodos[j]];
+  for(let k=0;k<nodos.length;k++){
+    if(k===i || k===j) continue;
+    if(distPuntoSegmento(posiciones[nodos[k]], a, b) < RADIO_NODO + MARGEN_RUTA) return k;
+  }
+  return -1;
+}
+
 // ---------------- PANEL 1: SETUP ----------------
 function renderSetup(){
   fase = 'setup'; setPill('setup');
-  document.getElementById('graph-hint').textContent = 'Elige cuántas ciudades quieres explorar para empezar.';
+  setHint('Elige cuántas ciudades quieres explorar para empezar.');
   document.getElementById('svg-main').innerHTML = '';
   document.getElementById('control-panel').innerHTML = `
     <h2>¿Cuántas ciudades?</h2>
@@ -266,23 +304,54 @@ function cambiarN(delta){
 function confirmarN(){
   nodos = Array.from({length:n}, (_,i)=>String.fromCharCode(65+i));
   matriz = Array.from({length:n}, (_,i)=>Array.from({length:n}, (_,j)=> i===j?0:INF));
-  posiciones = layoutCircular(nodos);
+  posiciones = layoutAleatorio(nodos);
   renderConectar();
 }
 
-function layoutCircular(lista){
-  const pos = {}; const cx=180, cy=180, r=138;
+// Posiciones aleatorias por todo el recuadro (con distancia mínima para que no se tapen)
+function layoutAleatorio(lista){
+  const W = 560, H = 440, margen = 40;
+  let minDist = 112; // más separación entre ciudades para evitar choques
+  let pos = {};
+  for(let intento=0; intento<60; intento++){
+    pos = {};
+    let ok = true;
+    for(const nodo of lista){
+      let colocado = false;
+      for(let t=0; t<200; t++){
+        const x = margen + Math.random()*(W - 2*margen);
+        const y = margen + Math.random()*(H - 2*margen);
+        const choca = Object.values(pos).some(p => Math.hypot(p.x-x, p.y-y) < minDist);
+        if(!choca){ pos[nodo] = {x, y}; colocado = true; break; }
+      }
+      if(!colocado){ ok = false; break; }
+    }
+    if(ok) return pos;
+    if(intento % 10 === 9) minDist -= 6; // relaja la distancia si cuesta acomodar
+  }
+  // respaldo: cuadrícula con pequeño desfase aleatorio
+  const cols = Math.ceil(Math.sqrt(lista.length));
+  const celda = (W - 2*margen) / cols;
   lista.forEach((nodo,i)=>{
-    const ang = (2*Math.PI*i/lista.length) - Math.PI/2;
-    pos[nodo] = { x: cx + r*Math.cos(ang), y: cy + r*Math.sin(ang) };
+    pos[nodo] = {
+      x: margen + (i%cols)*celda + celda/2 + (Math.random()-0.5)*celda*0.4,
+      y: margen + Math.floor(i/cols)*celda + celda/2 + (Math.random()-0.5)*celda*0.4
+    };
   });
   return pos;
+}
+
+function reubicarNodos(){
+  posiciones = layoutAleatorio(nodos);
+  selectedNode = null;
+  dibujarGrafo();
+  setHint(HINT_CONECTAR);
 }
 
 // ---------------- PANEL 2: CONECTAR ----------------
 function renderConectar(){
   fase = 'conectar'; setPill('conectar'); selectedNode = null;
-  document.getElementById('graph-hint').textContent = 'Toca dos ciudades para conectarlas, o genera un mapa al azar.';
+  setHint(HINT_CONECTAR);
   dibujarGrafo();
   actualizarControlConectar();
 }
@@ -295,15 +364,20 @@ function actualizarControlConectar(){
       banner = `<div class="banner banner-ok">✅ Ya se puede armar una ruta cerrada que visite todas las ciudades.</div>`;
     } else {
       const falt = aristasFaltantes();
-      banner = `<div class="banner banner-warn">Aún falta conectar algunas ciudades para cerrar el circuito:
-        <div class="missing-list">${falt.map(([a,b])=>`<span class="missing-chip">${a} – ${b}</span>`).join('')}</div></div>`;
+      if(falt.length){
+        banner = `<div class="banner banner-warn">Aún falta conectar algunas ciudades para cerrar el circuito:
+          <div class="missing-list">${falt.map(([a,b])=>`<span class="missing-chip">${a} – ${b}</span>`).join('')}</div></div>`;
+      } else {
+        banner = `<div class="banner banner-warn">Con el máximo de 3 rutas por ciudad no se puede cerrar el circuito así. Quita alguna ruta y prueba otra combinación.</div>`;
+      }
     }
   }
 
   document.getElementById('control-panel').innerHTML = `
     <h2>Conecta tus ciudades</h2>
-    <p>Haz clic en dos nodos del grafo para trazar una ruta y ponerle una distancia.</p>
+    <p>Haz clic en dos nodos del grafo para trazar una ruta y ponerle una distancia. Cada ciudad admite <b>máximo 3 conexiones</b>.</p>
     <button class="btn btn-glass" onclick="generarAleatorio()">🎲 Generar rutas al azar</button>
+    <button class="btn btn-glass" onclick="reubicarNodos()">📍 Reubicar ciudades</button>
     ${banner}
     <button class="btn btn-primary" id="btn-explorar" ${hayCiclo?'':'disabled'} onclick="prepararExplorar()">
       Explorar rutas válidas ►
@@ -316,15 +390,56 @@ function matrizTieneAlgunaArista(){
   return false;
 }
 
-function generarAleatorio(){
-  for(let i=0;i<n;i++){
-    const sig=(i+1)%n, peso=1+Math.floor(Math.random()*100);
-    matriz[i][sig]=peso; matriz[sig][i]=peso;
+// orden de visita tipo "vecino más cercano" (con algo de azar): genera rutas cortas que rara vez cruzan otras ciudades
+function ordenVecinoCercano(){
+  const resto = Array.from({length:n}, (_,i)=>i);
+  let actual = resto.splice(Math.floor(Math.random()*n), 1)[0];
+  const orden = [actual];
+  while(resto.length){
+    const pa = posiciones[nodos[actual]];
+    resto.sort((x,y)=> Math.hypot(posiciones[nodos[x]].x-pa.x, posiciones[nodos[x]].y-pa.y)
+                     - Math.hypot(posiciones[nodos[y]].x-pa.x, posiciones[nodos[y]].y-pa.y));
+    const idx = (resto.length>1 && Math.random()<0.3) ? 1 : 0;
+    actual = resto.splice(idx,1)[0];
+    orden.push(actual);
   }
+  return orden;
+}
+
+function anilloLibre(orden){
+  for(let k=0;k<n;k++){
+    if(nodoBloqueante(orden[k], orden[(k+1)%n]) !== -1) return false;
+  }
+  return true;
+}
+
+function generarAleatorio(){
+  // buscar un anillo base (circuito que visita todas las ciudades) cuyas rutas no pasen sobre otras ciudades
+  let orden = null;
+  for(let reintento=0; reintento<30 && !orden; reintento++){
+    for(let t=0; t<250; t++){
+      const cand = t<200 ? ordenVecinoCercano() : Array.from({length:n}, (_,i)=>i).sort(()=>Math.random()-0.5);
+      if(anilloLibre(cand)){ orden = cand; break; }
+    }
+    if(!orden) posiciones = layoutAleatorio(nodos); // si no se logra, se reubican las ciudades
+  }
+  if(!orden) orden = ordenVecinoCercano();
+
+  // limpiar rutas previas
+  for(let i=0;i<n;i++) for(let j=0;j<n;j++) matriz[i][j] = i===j ? 0 : INF;
+
+  // anillo base: cada nodo queda con 2 conexiones
+  for(let k=0;k<n;k++){
+    const a = orden[k], b = orden[(k+1)%n];
+    const peso = 1+Math.floor(Math.random()*100);
+    matriz[a][b] = peso; matriz[b][a] = peso;
+  }
+  // rutas extra al azar: ambos nodos con menos de 3 conexiones y sin pasar sobre otra ciudad
   for(let i=0;i<n;i++) for(let j=i+1;j<n;j++){
-    if(matriz[i][j]===INF && Math.random()<0.35){
-      const peso=1+Math.floor(Math.random()*100);
-      matriz[i][j]=peso; matriz[j][i]=peso;
+    if(matriz[i][j]===INF && grado(i)<MAX_CONEXIONES && grado(j)<MAX_CONEXIONES
+       && nodoBloqueante(i,j)===-1 && Math.random()<0.4){
+      const peso = 1+Math.floor(Math.random()*100);
+      matriz[i][j] = peso; matriz[j][i] = peso;
     }
   }
   dibujarGrafo();
@@ -337,17 +452,43 @@ function onNodeClick(nodo){
   if(selectedNode === null){
     selectedNode = nodo;
     dibujarGrafo();
-    document.getElementById('graph-hint').textContent = `${nodo} seleccionado → toca otra ciudad para conectarla.`;
+    setHint(`${nodo} seleccionado (${grado(nodos.indexOf(nodo))}/${MAX_CONEXIONES} conexiones) → toca otra ciudad para conectarla.`);
     return;
   }
   if(selectedNode === nodo){
     selectedNode = null;
     dibujarGrafo();
-    document.getElementById('graph-hint').textContent = 'Toca dos ciudades para conectarlas, o genera un mapa al azar.';
+    setHint(HINT_CONECTAR);
     return;
   }
-  abrirModalArista(selectedNode, nodo);
+  const a = selectedNode, b = nodo;
+  const i = nodos.indexOf(a), j = nodos.indexOf(b);
+  const existe = matriz[i][j] !== INF;
   selectedNode = null;
+
+  // regla: máximo 3 conexiones por nodo (solo bloquea rutas nuevas)
+  if(!existe){
+    if(grado(i) >= MAX_CONEXIONES){
+      dibujarGrafo();
+      setHint(`${a} ya tiene ${MAX_CONEXIONES} conexiones. Quita una ruta de ${a} para poder agregar otra.`, true);
+      return;
+    }
+    if(grado(j) >= MAX_CONEXIONES){
+      dibujarGrafo();
+      setHint(`${b} ya tiene ${MAX_CONEXIONES} conexiones. Quita una ruta de ${b} para poder agregar otra.`, true);
+      return;
+    }
+  }
+  // regla: la ruta no debe pasar por encima de otra ciudad
+  if(!existe){
+    const bl = nodoBloqueante(i, j);
+    if(bl !== -1){
+      dibujarGrafo();
+      setHint(`La ruta ${a}–${b} pasaría por encima de ${nodos[bl]}. Conecta primero con ${nodos[bl]} o reubica las ciudades.`, true);
+      return;
+    }
+  }
+  abrirModalArista(a, b);
 }
 
 function abrirModalArista(a,b){
@@ -365,7 +506,7 @@ function cerrarModal(){
   document.getElementById('modal-peso').classList.remove('open');
   pendingEdge = null;
   dibujarGrafo();
-  document.getElementById('graph-hint').textContent = 'Toca dos ciudades para conectarlas, o genera un mapa al azar.';
+  setHint(HINT_CONECTAR);
 }
 
 function guardarArista(){
@@ -378,7 +519,7 @@ function guardarArista(){
   pendingEdge = null;
   dibujarGrafo();
   actualizarControlConectar();
-  document.getElementById('graph-hint').textContent = 'Toca dos ciudades para conectarlas, o genera un mapa al azar.';
+  setHint(HINT_CONECTAR);
 }
 
 function quitarArista(){
@@ -389,6 +530,7 @@ function quitarArista(){
   pendingEdge = null;
   dibujarGrafo();
   actualizarControlConectar();
+  setHint(HINT_CONECTAR);
 }
 
 // ---------------- lógica de ciclos ----------------
@@ -401,21 +543,45 @@ function permutar(arr){
   }
   return res;
 }
-function cicloValido(ciclo){
-  for(let i=0;i<ciclo.length-1;i++){
-    const a=nodos.indexOf(ciclo[i]), b=nodos.indexOf(ciclo[i+1]);
-    if(matriz[a][b]===INF) return false;
+
+// Búsqueda por retroceso: solo recorre caminos que existen en el grafo
+// (con máx. 3 conexiones por nodo es muy rápida). Si soloUno=true se detiene al primer ciclo.
+function buscarCiclos(soloUno){
+  const resultado = [];
+  const visitado = Array(n).fill(false);
+  const camino = [0];
+  visitado[0] = true;
+
+  function dfs(actual){
+    if(soloUno && resultado.length>0) return;
+    if(camino.length === n){
+      if(matriz[actual][0] !== INF){
+        resultado.push([...camino, 0].map(k=>nodos[k]));
+      }
+      return;
+    }
+    for(let sig=1; sig<n; sig++){
+      if(!visitado[sig] && matriz[actual][sig] !== INF){
+        visitado[sig] = true; camino.push(sig);
+        dfs(sig);
+        camino.pop(); visitado[sig] = false;
+        if(soloUno && resultado.length>0) return;
+      }
+    }
   }
-  return true;
+  dfs(0);
+  return resultado;
 }
+
 function existeCicloValido(){
   if(!matrizTieneAlgunaArista()) return false;
-  const perms = permutar(nodos.slice(1));
-  return perms.some(p => cicloValido([nodos[0],...p,nodos[0]]));
+  return buscarCiclos(true).length > 0;
 }
+
+// Aristas que faltarían para cerrar un circuito, respetando el máximo de 3 conexiones
 function aristasFaltantes(){
   const perms = permutar(nodos.slice(1));
-  let mejor=null;
+  let mejor = null;
   for(const p of perms){
     const ciclo=[nodos[0],...p,nodos[0]];
     const falt=[];
@@ -423,18 +589,20 @@ function aristasFaltantes(){
       const a=nodos.indexOf(ciclo[i]), b=nodos.indexOf(ciclo[i+1]);
       if(matriz[a][b]===INF) falt.push([ciclo[i],ciclo[i+1]]);
     }
-    if(mejor===null || falt.length<mejor.length) mejor=falt;
+    if(mejor!==null && falt.length>=mejor.length) continue;
+
+    // comprobar que agregar esas rutas no pase de 3 conexiones en ningún nodo
+    const extra = Array(n).fill(0);
+    falt.forEach(([x,y])=>{ extra[nodos.indexOf(x)]++; extra[nodos.indexOf(y)]++; });
+    let valido = true;
+    for(let k=0;k<n;k++) if(grado(k)+extra[k] > MAX_CONEXIONES){ valido=false; break; }
+    if(valido) mejor = falt;
   }
-  return mejor;
+  return mejor || [];
 }
+
 function calcularCiclosValidos(){
-  const perms = permutar(nodos.slice(1));
-  const validos = [];
-  perms.forEach(p=>{
-    const ciclo=[nodos[0],...p,nodos[0]];
-    if(cicloValido(ciclo)) validos.push(ciclo);
-  });
-  return validos;
+  return buscarCiclos(false);
 }
 function costoDeCiclo(ciclo){
   let c=0;
@@ -450,7 +618,7 @@ function prepararExplorar(){
   cicloValidos = calcularCiclosValidos();
   exploreIndex = 0; mejorCiclo=null; mejorCosto=INF;
   fase = 'explorar'; setPill('explorar'); selectedNode=null;
-  document.getElementById('graph-hint').textContent = `${cicloValidos.length} ruta(s) cerrada(s) posibles. Vamos a compararlas.`;
+  setHint(`${cicloValidos.length} ruta(s) cerrada(s) posibles. Vamos a compararlas.`);
   dibujarGrafo();
   renderControlExplorar();
 }
@@ -519,7 +687,7 @@ function pararAutoplay(){
 // ---------------- PANEL 4: FINAL ----------------
 function mostrarFinal(){
   fase = 'final'; setPill('final'); pararAutoplay();
-  document.getElementById('graph-hint').textContent = 'Esta es la ruta más corta posible para tu mapa.';
+  setHint('Esta es la ruta más corta posible para tu mapa.');
   dibujarGrafo();
   animarCiclo(mejorCiclo, '#ff7a6e', true);
 
@@ -569,16 +737,37 @@ function dibujarGrafo(){
   svg.appendChild(routeLayer);
 
   // 3) etiquetas de peso (van encima de la capa de rutas)
+  // la etiqueta se desplaza a lo largo de la ruta para no quedar sobre una ciudad ni sobre otra etiqueta
+  const etiquetasColocadas = [];
+  const posiblesT = [0.5, 0.4, 0.6, 0.33, 0.67, 0.25, 0.75];
   for(let i=0;i<nodos.length;i++){
     for(let j=i+1;j<nodos.length;j++){
       if(matriz[i][j]!==INF){
         const p1=posiciones[nodos[i]], p2=posiciones[nodos[j]];
-        const mx=(p1.x+p2.x)/2, my=(p1.y+p2.y)/2;
+
+        let mejor = null, mejorPuntaje = Infinity;
+        for(const t of posiblesT){
+          const px = p1.x + (p2.x-p1.x)*t, py = p1.y + (p2.y-p1.y)*t;
+          let puntaje = 0;
+          nodos.forEach(nd=>{
+            const q = posiciones[nd];
+            const d = Math.hypot(q.x-px, q.y-py);
+            if(d < RADIO_NODO + 15) puntaje += (RADIO_NODO + 15 - d) * 3;
+          });
+          etiquetasColocadas.forEach(e=>{
+            const d = Math.hypot(e.x-px, e.y-py);
+            if(d < 30) puntaje += (30 - d) * 3;
+          });
+          if(puntaje < mejorPuntaje){ mejorPuntaje = puntaje; mejor = {x:px, y:py}; }
+          if(puntaje === 0) break;
+        }
+        etiquetasColocadas.push(mejor);
+
         const bg=document.createElementNS(ns,'circle');
-        bg.setAttribute('cx',mx); bg.setAttribute('cy',my); bg.setAttribute('r',11); bg.setAttribute('fill','#fff');
+        bg.setAttribute('cx',mejor.x); bg.setAttribute('cy',mejor.y); bg.setAttribute('r',12); bg.setAttribute('fill','#fff');
         svg.appendChild(bg);
         const txt=document.createElementNS(ns,'text');
-        txt.setAttribute('x',mx); txt.setAttribute('y',my+4); txt.setAttribute('text-anchor','middle');
+        txt.setAttribute('x',mejor.x); txt.setAttribute('y',mejor.y+4); txt.setAttribute('text-anchor','middle');
         txt.setAttribute('class','edge-label'); txt.textContent = matriz[i][j];
         svg.appendChild(txt);
       }
